@@ -1,0 +1,192 @@
+#!/bin/zsh
+
+KEYCHAIN_NAME="kcEnvironmentVariables.keychain"
+KEYCHAIN_PATH=~/Library/Keychains/$KEYCHAIN_NAME-db
+
+# Helper function to print usage information
+usage() {
+  echo "Usage: kc <command> [options]"
+  echo "Commands:"
+  echo "  kc                   - Show this help message."
+  echo "  kc add <VAR_NAME>     - Add a new environment variable to the keychain."
+  echo "  kc delete <VAR_NAME>  - Delete an environment variable from the keychain."
+  echo "  kc list               - List all environment variables stored in the keychain."
+  echo "  kc export <VAR_NAME>  - Export the specified variable(s) as environment variables."
+  echo "  kc show <VAR_NAME>    - Show the value of the specified variable(s)."
+  echo "  kc delete-keychain    - Delete the entire keychain."
+  return 1
+}
+
+# Ensure the keychain exists, or prompt to create it
+check_or_create_keychain() {
+  if [[ ! -f $KEYCHAIN_PATH ]]; then
+    echo "Keychain '$KEYCHAIN_NAME' does not exist."
+    read -q "response?Would you like to create it? (Y/N): "
+    echo
+    if [[ $response != "Y" && $response != "y" ]]; then
+      echo "Exiting without creating keychain."
+      return 0
+    fi
+
+    security create-keychain "$KEYCHAIN_NAME"
+
+    # Add keychain to the search list
+    current_keychains=($(security list-keychains | tr -d ' "'))
+    security list-keychains -s "${current_keychains[@]}" "$KEYCHAIN_PATH"
+
+    echo "Keychain '$KEYCHAIN_NAME' created and added to the keychain search list."
+  fi
+}
+
+
+# Add a variable to the keychain
+add_variable() {
+  local var_name=$1
+  
+  item_exists $var_name
+  if [[ $? -eq 0 ]]; then
+    echo "Error: Variable '$var_name' already exists in the keychain." >&2
+    return 1
+  fi
+
+  echo "Enter secret for $var_name: "
+  read -s secret
+  security add-generic-password -a "$var_name" -s "$var_name" -w "$secret" $KEYCHAIN_PATH
+  echo "Variable '$var_name' added to the keychain."
+}
+
+# Delete a variable from the keychain
+delete_variable() {
+  local var_name=$1
+  security delete-generic-password -s "$var_name" $KEYCHAIN_PATH > /dev/null
+  if [[ $? -eq 0 ]]; then
+    echo "Variable '$var_name' deleted from the keychain."
+  else
+    echo "Error: Could not find or delete '$var_name'."
+  fi
+}
+
+# List all variables in the keychain
+list_variables() {
+  security dump-keychain -a $KEYCHAIN_PATH | awk -F'=' '/0x00000007/ { print $2 }' | grep -o '\w*' | while read -r line; do
+    if [[ ! -z $line ]]; then
+      echo "$line"
+    fi
+  done
+}
+
+# Export keychain variables as environment variables
+export_variables() {
+  for var_name in "$@"; do
+    local secret=$(security find-generic-password -a "$var_name" -w $KEYCHAIN_PATH 2>/dev/null)
+    if [[ $? -eq 0 ]]; then
+      typeset -x $var_name="$secret"
+      echo "Exported $var_name as an environment variable."
+    else
+      echo "Error: Variable '$var_name' not found in the keychain." >&2
+    fi
+  done
+}
+
+# Show the value of a variable
+show_variable() {
+  for var_name in "$@"; do
+    item_exists $var_name
+    if [[ $? -eq 0 ]]; then
+      local secret=$(security find-generic-password -a "$var_name" -w $KEYCHAIN_PATH 2>/dev/null)
+      echo "$var_name=$secret"
+    else
+      echo "Error: Variable '$var_name' not found in the keychain." >&2
+    fi
+  done
+}
+
+# Delete the entire keychain
+delete_keychain() {
+  read -q "response?Are you sure you want to delete the entire keychain '$KEYCHAIN_NAME'? (y/N): "
+  echo
+  if [[ $response != "y" && $response != "Y" ]]; then
+    echo "Exiting without deleting keychain."
+    return 0
+  fi
+
+  security delete-keychain "$KEYCHAIN_PATH"
+  if [[ $? -eq 0 ]]; then
+    echo "Keychain '$KEYCHAIN_NAME' deleted successfully."
+  else
+    echo "Error: Failed to delete keychain."
+  fi
+}
+
+item_exists() {
+  # `security find-generic-password` doesn't return a non-zero error code if it's missing,
+  # so we have to do string matching even though it's potentially brittle
+  local exists=$(security find-generic-password -w -a "$1" $KEYCHAIN_PATH 2>&1)
+  if [[ "$exists" == *"The specified item could not be found"* ]]; then 
+    return 1
+  else
+    return 0
+  fi
+}
+
+# Main command handler
+case "$1" in
+  "" | "help" | "usage")
+    usage
+    check_or_create_keychain
+    ;;
+  "add")
+    if [ -z "$2" ]; then
+      echo "Error: Missing variable name."
+      usage
+    fi
+    check_or_create_keychain
+    add_variable "$2"
+    ;;
+  "delete")
+    if [ -z "$2" ]; then
+      echo "Error: Missing variable name."
+      usage
+    fi
+    check_or_create_keychain
+    delete_variable "$2"
+    ;;
+  "list")
+    check_or_create_keychain
+    list_variables
+    ;;
+  "export")
+    if [ -z "$2" ]; then
+      echo "Error: Missing variable name(s)."
+      usage
+    fi
+    if [[ "${ZSH_EVAL_CONTEXT}" != *:file ]]; then
+      script_name="${(%):-%x}"
+      for arg in "$@"; do
+        quoted_args+=("$(printf '%q' "$arg")")  # Properly quote each arg for re-use
+      done
+      echo "Error: kc must be sourced when exporting -- re-run like this:" >&2
+      echo ". ${script_name} ${quoted_args[*]}"
+      exit 1
+    fi
+
+    check_or_create_keychain
+    export_variables "${(@)argv[2,-1]}"
+    ;;
+  "show")
+    if [ -z "$2" ]; then
+      echo "Error: Missing variable name(s)."
+      usage
+    fi
+    check_or_create_keychain
+    show_variable "${(@)argv[2,-1]}"
+    ;;
+  "delete-keychain")
+    check_or_create_keychain
+    delete_keychain
+    ;;
+  *)
+    echo "Error: Unknown command '$1'."
+    usage
+    ;;
+esac
