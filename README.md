@@ -87,7 +87,7 @@ export KC_KEYCHAIN_NAME="my-custom-keychain"
 
 ## License
 
-[Add your chosen license here]
+MIT License. See `LICENSE` file for details.
 
 ## Contributing
 
